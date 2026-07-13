@@ -82,57 +82,71 @@ def p_sample_step(x, t, eps, beta, alpha, alpha_cum):
     sigma = tf.sqrt(beta)
     return mean + sigma * tf.random.normal(tf.shape(x))
 
+@tf.function(reduce_retracing=True)
+def _generate_loop(gen_model, x, cond, guidance_scale, n_samples):
+    # Use tf.while_loop by using a standard range but wrapped in tf.function
+    # This compiles the whole generation loop into a fast graph for CPU.
+    for step in tf.range(TIMESTEPS2 - 1, -1, -1):
+        t_batch = tf.fill((n_samples,), step)
+        eps_u = gen_model([x, t_batch, tf.fill((n_samples,), NULL_CLS)], training=False)
+        eps_c = gen_model([x, t_batch, cond], training=False)
+        eps = eps_u + guidance_scale * (eps_c - eps_u)
+        
+        # We must gather scalars from the constant arrays because we are inside a tf.function
+        beta = tf.gather(betas2, step)
+        alpha = tf.gather(alphas2, step)
+        alpha_hat = tf.gather(alpha_hats2, step)
+        
+        x = p_sample_step(x, t_batch, eps, beta, alpha, alpha_hat)
+    return x
+
 def gen_samples(gen_model, n_samples, conditioning, guidance_scale, seed=None):
     if seed is not None:
         tf.random.set_seed(seed)
         
     x = tf.random.normal((n_samples, IMG_SZ2, IMG_SZ2, CH2))
     cond = tf.convert_to_tensor(conditioning, dtype=tf.int32)
-    for step in reversed(range(TIMESTEPS2)):
+    guidance_scale_tf = tf.convert_to_tensor(guidance_scale, dtype=tf.float32)
+    
+    x = _generate_loop(gen_model, x, cond, guidance_scale_tf, n_samples)
+    return (x + 1.0) * 0.5
+
+@tf.function(reduce_retracing=True)
+def _generate_from_image_loop(gen_model, x, cond, guidance_scale, n_samples, t_start):
+    for step in tf.range(t_start - 1, -1, -1):
         t_batch = tf.fill((n_samples,), step)
         eps_u = gen_model([x, t_batch, tf.fill((n_samples,), NULL_CLS)], training=False)
         eps_c = gen_model([x, t_batch, cond], training=False)
         eps = eps_u + guidance_scale * (eps_c - eps_u)
-        x = p_sample_step(x, t_batch, eps, betas2[step], alphas2[step], alpha_hats2[step])
-    return (x + 1.0) * 0.5
+        
+        beta = tf.gather(betas2, step)
+        alpha = tf.gather(alphas2, step)
+        alpha_hat = tf.gather(alpha_hats2, step)
+        
+        x = p_sample_step(x, t_batch, eps, beta, alpha, alpha_hat)
+    return x
 
 def gen_samples_from_image(gen_model, x_start, strength, conditioning, guidance_scale, seed=None):
-    """Image-to-image generation: add noise to a sketch, then denoise it.
-
-    Args:
-        gen_model: The trained UNet model.
-        x_start: Input image tensor, shape (N, 28, 28, 1), range [-1, 1].
-        strength: Float in [0, 1]. 0 = return input as-is, 1 = full noise (ignore input).
-        conditioning: List of class labels.
-        guidance_scale: Classifier-free guidance scale.
-        seed: Optional random seed.
-    """
+    """Image-to-image generation: add noise to a sketch, then denoise it."""
     if seed is not None:
         tf.random.set_seed(seed)
 
     n_samples = tf.shape(x_start)[0]
     x_start = tf.cast(x_start, tf.float32)
 
-    # Compute starting timestep
     t_start = int(strength * TIMESTEPS2)
 
-    # Edge case: no diffusion at all — return the sketch normalized to [0, 1]
     if t_start == 0:
         return (x_start + 1.0) * 0.5
 
-    # Forward diffuse: add noise to the sketch up to timestep t_start
-    # x_t = sqrt(alpha_hat_t) * x_0 + sqrt(1 - alpha_hat_t) * noise
     noise = tf.random.normal(tf.shape(x_start))
-    alpha_hat_t = alpha_hats2[t_start - 1]  # 0-indexed
+    alpha_hat_t = alpha_hats2[t_start - 1]
     x = tf.sqrt(alpha_hat_t) * x_start + tf.sqrt(1 - alpha_hat_t) * noise
 
-    # Reverse diffuse from t_start-1 down to 0 (partial schedule)
     cond = tf.convert_to_tensor(conditioning, dtype=tf.int32)
-    for step in reversed(range(t_start)):
-        t_batch = tf.fill((n_samples,), step)
-        eps_u = gen_model([x, t_batch, tf.fill((n_samples,), NULL_CLS)], training=False)
-        eps_c = gen_model([x, t_batch, cond], training=False)
-        eps = eps_u + guidance_scale * (eps_c - eps_u)
-        x = p_sample_step(x, t_batch, eps, betas2[step], alphas2[step], alpha_hats2[step])
+    guidance_scale_tf = tf.convert_to_tensor(guidance_scale, dtype=tf.float32)
+    t_start_tf = tf.convert_to_tensor(t_start, dtype=tf.int32)
+    
+    x = _generate_from_image_loop(gen_model, x, cond, guidance_scale_tf, n_samples, t_start_tf)
 
     return (x + 1.0) * 0.5
