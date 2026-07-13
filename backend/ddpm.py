@@ -95,3 +95,44 @@ def gen_samples(gen_model, n_samples, conditioning, guidance_scale, seed=None):
         eps = eps_u + guidance_scale * (eps_c - eps_u)
         x = p_sample_step(x, t_batch, eps, betas2[step], alphas2[step], alpha_hats2[step])
     return (x + 1.0) * 0.5
+
+def gen_samples_from_image(gen_model, x_start, strength, conditioning, guidance_scale, seed=None):
+    """Image-to-image generation: add noise to a sketch, then denoise it.
+
+    Args:
+        gen_model: The trained UNet model.
+        x_start: Input image tensor, shape (N, 28, 28, 1), range [-1, 1].
+        strength: Float in [0, 1]. 0 = return input as-is, 1 = full noise (ignore input).
+        conditioning: List of class labels.
+        guidance_scale: Classifier-free guidance scale.
+        seed: Optional random seed.
+    """
+    if seed is not None:
+        tf.random.set_seed(seed)
+
+    n_samples = tf.shape(x_start)[0]
+    x_start = tf.cast(x_start, tf.float32)
+
+    # Compute starting timestep
+    t_start = int(strength * TIMESTEPS2)
+
+    # Edge case: no diffusion at all — return the sketch normalized to [0, 1]
+    if t_start == 0:
+        return (x_start + 1.0) * 0.5
+
+    # Forward diffuse: add noise to the sketch up to timestep t_start
+    # x_t = sqrt(alpha_hat_t) * x_0 + sqrt(1 - alpha_hat_t) * noise
+    noise = tf.random.normal(tf.shape(x_start))
+    alpha_hat_t = alpha_hats2[t_start - 1]  # 0-indexed
+    x = tf.sqrt(alpha_hat_t) * x_start + tf.sqrt(1 - alpha_hat_t) * noise
+
+    # Reverse diffuse from t_start-1 down to 0 (partial schedule)
+    cond = tf.convert_to_tensor(conditioning, dtype=tf.int32)
+    for step in reversed(range(t_start)):
+        t_batch = tf.fill((n_samples,), step)
+        eps_u = gen_model([x, t_batch, tf.fill((n_samples,), NULL_CLS)], training=False)
+        eps_c = gen_model([x, t_batch, cond], training=False)
+        eps = eps_u + guidance_scale * (eps_c - eps_u)
+        x = p_sample_step(x, t_batch, eps, betas2[step], alphas2[step], alpha_hats2[step])
+
+    return (x + 1.0) * 0.5

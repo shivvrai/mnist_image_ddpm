@@ -315,3 +315,148 @@ input[type="range"]::-webkit-slider-thumb:hover {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── Mode Toggle (pill switch) ── */
+.mode-toggle {
+  display: flex;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-panel);
+  border-radius: 999px;
+  padding: 4px;
+  gap: 0;
+  backdrop-filter: blur(16px);
+}
+
+.mode-toggle button {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 0.5rem 1.25rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.mode-toggle button.active {
+  background: var(--text-primary);
+  color: var(--bg-base);
+  box-shadow: 0 2px 8px rgba(255, 255, 255, 0.15);
+}
+
+.mode-toggle button:not(.active):hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ── Drawing Canvas ── */
+.canvas-container {
+  width: 320px;
+  height: 320px;
+  border-radius: 16px;
+  background: #000000;
+  border: 1px solid var(--border-panel);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+  position: relative;
+  box-shadow:
+    0 20px 40px rgba(0, 0, 0, 0.5),
+    inset 0 0 60px rgba(255, 255, 255, 0.02);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.canvas-container:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow:
+    0 20px 40px rgba(0, 0, 0, 0.5),
+    0 0 20px rgba(255, 255, 255, 0.03),
+    inset 0 0 60px rgba(255, 255, 255, 0.02);
+}
+
+.canvas-container canvas {
+  cursor: crosshair;
+  image-rendering: auto;
+  border-radius: 12px;
+}
+
+.canvas-label {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  background: rgba(0, 0, 0, 0.8);
+  border: 1px solid var(--border-panel);
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Subtle grid overlay for drawing guidance */
+.canvas-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 1;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+  border-radius: 16px;
+}
+
+/* ── Canvas Action Buttons ── */
+.canvas-actions {
+  position: absolute;
+  bottom: 1rem;
+  right: 1rem;
+  display: flex;
+  gap: 0.5rem;
+  z-index: 2;
+}
+
+.canvas-action-btn {
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid var(--border-panel);
+  color: var(--text-secondary);
+  padding: 0.4rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(8px);
+}
+
+.canvas-action-btn:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.85);
+}
+
+/* ── Strength indicator ── */
+.strength-value {
+  font-family: 'Inter', monospace;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  padding: 0.2rem 0.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  min-width: 3.5em;
+  text-align: center;
+}
