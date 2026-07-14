@@ -66,7 +66,7 @@ from huggingface_hub import hf_hub_download
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    hf_repo_id = os.environ.get("HF_REPO_ID", "shivvrai/mnist-ddpm-weights")
+    hf_repo_id = os.environ.get("HF_REPO_ID", "shivrai01/mnist-ddpm-weight")
     
     # Startup: load the MNIST DDPM model
     weights_path = os.path.join("weights", "ddpm_mnist_cond_best.weights.h5")
