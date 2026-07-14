@@ -62,10 +62,22 @@ model_manager = ModelManager()
 # Simple dict cache: key -> GenerateResponse
 image_cache = {}
 
+from huggingface_hub import hf_hub_download
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    hf_repo_id = os.environ.get("HF_REPO_ID", "shivvrai/mnist-ddpm-weights")
+    
     # Startup: load the MNIST DDPM model
     weights_path = os.path.join("weights", "ddpm_mnist_cond_best.weights.h5")
+    if not os.path.exists(weights_path):
+        logger.info(f"Local DDPM weights not found. Downloading from HF Hub ({hf_repo_id})...")
+        try:
+            # Note: hf_hub_download caches the file and returns the path to the cached file
+            weights_path = hf_hub_download(repo_id=hf_repo_id, filename="ddpm_mnist_cond_best.weights.h5")
+        except Exception as e:
+            logger.error(f"Failed to download DDPM weights from HF Hub: {e}")
+
     try:
         model_manager.load_model("mnist-ddpm", weights_path)
     except Exception as e:
@@ -73,6 +85,13 @@ async def lifespan(app: FastAPI):
 
     # Load the sketch classifier
     classifier_path = os.path.join("weights", "mnist_classifier.keras")
+    if not os.path.exists(classifier_path):
+        logger.info(f"Local Classifier weights not found. Downloading from HF Hub ({hf_repo_id})...")
+        try:
+            classifier_path = hf_hub_download(repo_id=hf_repo_id, filename="mnist_classifier.keras")
+        except Exception as e:
+            logger.error(f"Failed to download Classifier from HF Hub: {e}")
+
     try:
         model_manager.load_classifier(classifier_path)
     except Exception as e:

@@ -4,3 +4,4 @@ pydantic
 tensorflow
 numpy
 pillow
+huggingface-hub
