@@ -5,6 +5,80 @@ import './index.css';
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:7860";
 const CANVAS_SIZE = 280; // 10x MNIST resolution for comfortable drawing
 
+// ---------------------------------------------------------------------------
+// Gradio API helper — uses the two-step SSE protocol required by HF Spaces
+// Step 1: POST /gradio_api/call/<api_name> with { data: [...] } → { event_id }
+// Step 2: GET  /gradio_api/call/<api_name>/<event_id> → SSE stream → "complete" event has the result
+// ---------------------------------------------------------------------------
+async function gradioCall(apiName, ...args) {
+  // Step 1: Submit the call
+  const submitRes = await fetch(`${API_URL}/gradio_api/call/${apiName}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: args }),
+  });
+
+  if (!submitRes.ok) {
+    const text = await submitRes.text();
+    throw new Error(`Gradio submit failed (${submitRes.status}): ${text}`);
+  }
+
+  const { event_id } = await submitRes.json();
+
+  // Step 2: Read the SSE stream for the result
+  const streamRes = await fetch(
+    `${API_URL}/gradio_api/call/${apiName}/${event_id}`
+  );
+
+  if (!streamRes.ok) {
+    const text = await streamRes.text();
+    throw new Error(`Gradio stream failed (${streamRes.status}): ${text}`);
+  }
+
+  const reader = streamRes.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Parse SSE events from buffer
+    const lines = buffer.split("\n");
+    buffer = lines.pop(); // keep incomplete last line
+
+    for (const line of lines) {
+      if (line.startsWith("event: complete")) {
+        // The next "data:" line has the result
+        // Keep reading to get it
+      } else if (line.startsWith("event: error")) {
+        // Next data line has the error
+      } else if (line.startsWith("data: ")) {
+        const raw = line.slice(6);
+        try {
+          const parsed = JSON.parse(raw);
+          // Gradio returns data as an array — return the array
+          if (Array.isArray(parsed)) {
+            return parsed;
+          }
+          // Error responses come as strings or objects
+          if (typeof parsed === "string") {
+            throw new Error(parsed);
+          }
+        } catch (e) {
+          // Not JSON yet or partial, ignore and keep reading
+          if (e.message && !e.message.startsWith("Unexpected")) {
+            throw e;
+          }
+        }
+      }
+    }
+  }
+
+  throw new Error("Gradio SSE stream ended without a complete event");
+}
+
 function App() {
   const [digit, setDigit] = useState(7);
   const [guidanceScale, setGuidanceScale] = useState(3.0);
@@ -32,14 +106,9 @@ function App() {
 
   // Health check on mount
   useEffect(() => {
-    fetch(`${API_URL}/api/health`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data: [] })
-    })
-      .then(res => res.json())
-      .then(resp => {
-        const data = JSON.parse(resp.data[0]);
+    gradioCall("health")
+      .then(result => {
+        const data = JSON.parse(result[0]);
         if (data.status === 'ok') {
           setModelStatus("Online: " + data.loaded_models.join(", "));
           if (data.device) setDevice(data.device);
@@ -158,19 +227,14 @@ function App() {
     }, 200);
     
     try {
-      const response = await fetch(`${API_URL}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: [JSON.stringify({
-          digit,
-          guidance_scale: guidanceScale,
-          seed: newSeed,
-          model_id: "mnist-ddpm"
-        })] })
-      });
+      const result = await gradioCall("generate", JSON.stringify({
+        digit,
+        guidance_scale: guidanceScale,
+        seed: newSeed,
+        model_id: "mnist-ddpm"
+      }));
       
-      const resp = await response.json();
-      const data = JSON.parse(resp.data[0]);
+      const data = JSON.parse(result[0]);
       
       clearInterval(progressInterval);
       setProgress(100);
@@ -205,13 +269,8 @@ function App() {
     const sketchB64 = canvasRef.current.toDataURL('image/png');
 
     try {
-      const response = await fetch(`${API_URL}/api/classify-sketch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: [JSON.stringify({ sketch_b64: sketchB64 })] })
-      });
-      const resp = await response.json();
-      const data = JSON.parse(resp.data[0]);
+      const result = await gradioCall("classify-sketch", JSON.stringify({ sketch_b64: sketchB64 }));
+      const data = JSON.parse(result[0]);
       
       if (data.predicted_digit != null) {
         setDigit(data.predicted_digit);
@@ -249,21 +308,16 @@ function App() {
     }, Math.max(stepDuration, 100));
 
     try {
-      const response = await fetch(`${API_URL}/api/generate-from-sketch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: [JSON.stringify({
-          digit, // using the user-verified digit
-          guidance_scale: guidanceScale,
-          seed: newSeed,
-          model_id: "mnist-ddpm",
-          sketch_b64: sketchB64,
-          strength
-        })] })
-      });
+      const result = await gradioCall("generate-from-sketch", JSON.stringify({
+        digit, // using the user-verified digit
+        guidance_scale: guidanceScale,
+        seed: newSeed,
+        model_id: "mnist-ddpm",
+        sketch_b64: sketchB64,
+        strength
+      }));
 
-      const resp = await response.json();
-      const data = JSON.parse(resp.data[0]);
+      const data = JSON.parse(result[0]);
 
       clearInterval(progressInterval);
       setProgress(100);
