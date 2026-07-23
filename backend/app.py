@@ -196,7 +196,10 @@ def api_generate_from_sketch(request_json: str):
     })
 
 # ---------------------------------------------------------------------------
-# Gradio Blocks (API endpoints for the React frontend)
+# Gradio Blocks — pure Gradio app (no FastAPI wrapper)
+# The Gradio API protocol automatically creates POST endpoints at
+# /api/<api_name> that accept {"data": [...]} and return {"data": [...]},
+# which is exactly the format our React frontend already uses.
 # ---------------------------------------------------------------------------
 with gr.Blocks(title="MNIST Diffusion Backend") as demo:
     gr.Markdown("## MNIST Handwriting Diffusion - Backend API\nThis space serves the backend API. The frontend is deployed on Vercel.")
@@ -220,48 +223,4 @@ with gr.Blocks(title="MNIST Diffusion Backend") as demo:
         sketch_out = gr.Textbox()
         gr.Button().click(fn=api_generate_from_sketch, inputs=sketch_in, outputs=sketch_out, api_name="generate-from-sketch")
 
-# ---------------------------------------------------------------------------
-# FastAPI Wrapper (To support the legacy /api/ endpoints expected by frontend)
-# ---------------------------------------------------------------------------
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.post("/api/health")
-async def health_endpoint():
-    # Return exactly the format App.jsx expects: { data: [ "{...}" ] }
-    return {"data": [api_health()]}
-
-@app.post("/api/generate")
-async def generate_endpoint(request: Request):
-    req_json = await request.json()
-    # The frontend sends: { data: [ "{\"digit\": 7, ...}" ] }
-    inner_json = req_json.get("data", ["{}"])[0]
-    return {"data": [api_generate(inner_json)]}
-
-@app.post("/api/classify-sketch")
-async def classify_sketch_endpoint(request: Request):
-    req_json = await request.json()
-    inner_json = req_json.get("data", ["{}"])[0]
-    return {"data": [api_classify_sketch(inner_json)]}
-
-@app.post("/api/generate-from-sketch")
-async def generate_from_sketch_endpoint(request: Request):
-    req_json = await request.json()
-    inner_json = req_json.get("data", ["{}"])[0]
-    return {"data": [api_generate_from_sketch(inner_json)]}
-
-# Mount Gradio app at root
-app = gr.mount_gradio_app(app, demo, path="/")
-
-
+demo.launch()
