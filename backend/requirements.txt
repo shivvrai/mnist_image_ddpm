@@ -3,4 +3,4 @@ gradio
 spaces
 numpy
 pillow
-huggingface-hub
+huggingface-hub<0.27.0
