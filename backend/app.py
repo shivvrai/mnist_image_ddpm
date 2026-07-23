@@ -83,7 +83,7 @@ def api_health():
     return json.dumps({"status": "ok", "loaded_models": models, "device": DEVICE.type})
 
 
-@spaces.GPU(duration=120)
+@spaces.GPU(duration=30)
 def api_generate(request_json: str):
     try:
         req = json.loads(request_json)
@@ -126,7 +126,7 @@ def api_generate(request_json: str):
     return response
 
 
-@spaces.GPU(duration=30)
+@spaces.GPU(duration=15)
 def api_classify_sketch(request_json: str):
     try:
         req = json.loads(request_json)
@@ -154,7 +154,7 @@ def api_classify_sketch(request_json: str):
     })
 
 
-@spaces.GPU(duration=120)
+@spaces.GPU(duration=30)
 def api_generate_from_sketch(request_json: str):
     try:
         req = json.loads(request_json)
