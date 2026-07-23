@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Database, RefreshCw, LayoutGrid, Play, Zap, PenTool, Trash2, Eye } from 'lucide-react';
 import './index.css';
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:7860";
 const CANVAS_SIZE = 280; // 10x MNIST resolution for comfortable drawing
 
 function App() {
@@ -15,6 +15,7 @@ function App() {
   const [strength, setStrength] = useState(0.5);
   const [prediction, setPrediction] = useState(null); // { digit, confidence }
   const [pendingVerification, setPendingVerification] = useState(false);
+  const [device, setDevice] = useState("cpu");
   
   // Canvas drawing state
   const canvasRef = useRef(null);
@@ -31,10 +32,18 @@ function App() {
 
   // Health check on mount
   useEffect(() => {
-    fetch(`${API_URL}/health`)
+    fetch(`${API_URL}/api/health`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: [] })
+    })
       .then(res => res.json())
-      .then(data => {
-        if (data.status === 'ok') setModelStatus("Online: " + data.loaded_models.join(", "));
+      .then(resp => {
+        const data = JSON.parse(resp.data[0]);
+        if (data.status === 'ok') {
+          setModelStatus("Online: " + data.loaded_models.join(", "));
+          if (data.device) setDevice(data.device);
+        }
       })
       .catch(() => setModelStatus("Offline"));
   }, []);
@@ -141,23 +150,27 @@ function App() {
     setIsGenerating(true);
     setProgress(0);
     
+    const newSeed = Math.floor(Math.random() * 10000);
+    setSeed(newSeed);
+    
     const progressInterval = setInterval(() => {
       setProgress(p => Math.min(p + 5, 95));
     }, 200);
     
     try {
-      const response = await fetch(`${API_URL}/generate`, {
+      const response = await fetch(`${API_URL}/api/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: JSON.stringify({ data: [JSON.stringify({
           digit,
           guidance_scale: guidanceScale,
-          seed,
+          seed: newSeed,
           model_id: "mnist-ddpm"
-        })
+        })] })
       });
       
-      const data = await response.json();
+      const resp = await response.json();
+      const data = JSON.parse(resp.data[0]);
       
       clearInterval(progressInterval);
       setProgress(100);
@@ -192,12 +205,13 @@ function App() {
     const sketchB64 = canvasRef.current.toDataURL('image/png');
 
     try {
-      const response = await fetch(`${API_URL}/classify-sketch`, {
+      const response = await fetch(`${API_URL}/api/classify-sketch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sketch_b64: sketchB64 })
+        body: JSON.stringify({ data: [JSON.stringify({ sketch_b64: sketchB64 })] })
       });
-      const data = await response.json();
+      const resp = await response.json();
+      const data = JSON.parse(resp.data[0]);
       
       if (data.predicted_digit != null) {
         setDigit(data.predicted_digit);
@@ -221,6 +235,9 @@ function App() {
     setPendingVerification(false);
     setProgress(0);
 
+    const newSeed = Math.floor(Math.random() * 10000);
+    setSeed(newSeed);
+
     const sketchB64 = canvasRef.current.toDataURL('image/png');
 
     // Estimate progress: fewer steps when strength < 1
@@ -232,20 +249,21 @@ function App() {
     }, Math.max(stepDuration, 100));
 
     try {
-      const response = await fetch(`${API_URL}/generate-from-sketch`, {
+      const response = await fetch(`${API_URL}/api/generate-from-sketch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: JSON.stringify({ data: [JSON.stringify({
           digit, // using the user-verified digit
           guidance_scale: guidanceScale,
-          seed,
+          seed: newSeed,
           model_id: "mnist-ddpm",
           sketch_b64: sketchB64,
           strength
-        })
+        })] })
       });
 
-      const data = await response.json();
+      const resp = await response.json();
+      const data = JSON.parse(resp.data[0]);
 
       clearInterval(progressInterval);
       setProgress(100);
@@ -469,8 +487,8 @@ function App() {
             <RefreshCw size={16} className="spin" />
             <span>
               {mode === 'sketch'
-                ? `Running partial diffusion (${Math.ceil(strength * 300)} of 300 steps). This takes ${Math.max(1, Math.ceil(strength * 3))} minute(s). Please wait...`
-                : 'Generating on CPU (Native Windows GPU unsupported). This requires 600 model passes and takes 1-3 minutes. Please wait...'
+                ? `Running partial diffusion (${Math.ceil(strength * 300)} of 300 steps). Please wait...`
+                : (device === 'cuda' ? 'Generating on GPU. This takes a few seconds. Please wait...' : 'Generating on CPU (Native Windows GPU unsupported). This requires 600 model passes and takes 1-3 minutes. Please wait...')
               }
             </span>
           </div>

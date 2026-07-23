@@ -1,231 +1,266 @@
 import time
 import os
-import asyncio
+import json
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from tensorflow import keras
+import torch
+import gradio as gr
 
-from schemas import GenerateRequest, GenerateFromSketchRequest, GenerateResponse, ClassifySketchRequest, ClassifySketchResponse
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ZeroGPU support — graceful fallback for local development
+try:
+    import spaces
+except ImportError:
+    # Provide a no-op decorator so the code works locally without ZeroGPU
+    class _FakeSpaces:
+        @staticmethod
+        def GPU(fn=None, duration=120):
+            if fn is not None:
+                return fn
+            def decorator(f):
+                return f
+            return decorator
+    spaces = _FakeSpaces()
+
 from utils import logger, array_to_base64_png, base64_png_to_array
-from ddpm import build_unet2, gen_samples, gen_samples_from_image
+from ddpm import UNet, gen_samples, gen_samples_from_image
+from classifier import MNISTClassifier
 
-class ModelManager:
-    def __init__(self):
-        self.models = {}
-        self.classifier = None
-        
-    def load_model(self, model_id: str, filepath: str):
-        logger.info(f"Loading model '{model_id}' from {filepath}...")
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"Weights file not found at {filepath}")
-            
-        model = build_unet2()
-        model.load_weights(filepath)
-        self.models[model_id] = model
-        logger.info(f"Model '{model_id}' loaded successfully.")
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+unet_model = None
+classifier_model = None
 
-    def load_classifier(self, filepath: str):
-        logger.info(f"Loading classifier from {filepath}...")
-        if not os.path.exists(filepath):
-            logger.warning(f"Classifier not found at {filepath}. Sketch auto-prediction disabled.")
-            return
-        self.classifier = keras.models.load_model(filepath)
+def load_models():
+    global unet_model, classifier_model
+    
+    logger.info(f"Using device: {DEVICE}")
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    unet_path = os.path.join(base_dir, "weights", "ddpm_unet.pt")
+    clf_path = os.path.join(base_dir, "weights", "mnist_classifier.pt")
+
+    # Load UNet
+    if os.path.exists(unet_path):
+        logger.info(f"Loading UNet from {unet_path}...")
+        unet_model = UNet()
+        unet_model.load_state_dict(torch.load(unet_path, map_location="cpu", weights_only=True))
+        unet_model.eval()
+        unet_model.to(DEVICE)      # ZeroGPU: stays on CPU until @spaces.GPU runs
+        logger.info("UNet loaded successfully.")
+    else:
+        logger.error(f"UNet weights not found at {unet_path}")
+
+    # Load Classifier
+    if os.path.exists(clf_path):
+        logger.info(f"Loading Classifier from {clf_path}...")
+        classifier_model = MNISTClassifier()
+        classifier_model.load_state_dict(torch.load(clf_path, map_location="cpu", weights_only=True))
+        classifier_model.eval()
+        classifier_model.to(DEVICE)
         logger.info("Classifier loaded successfully.")
+    else:
+        logger.warning(f"Classifier weights not found at {clf_path}. Sketch prediction disabled.")
 
-    def classify(self, img_array: np.ndarray) -> tuple[int, float]:
-        """Classify a sketch image. Returns (predicted_digit, confidence).
-        
-        Args:
-            img_array: shape (1, 28, 28, 1), range [-1, 1] (DDPM format)
-        Returns:
-            (digit, confidence) tuple
-        """
-        if self.classifier is None:
-            return None, None
-        # Classifier expects [0, 1] range
-        clf_input = (img_array + 1.0) / 2.0
-        preds = self.classifier.predict(clf_input, verbose=0)
-        digit = int(np.argmax(preds[0]))
-        confidence = float(np.max(preds[0]))
-        return digit, confidence
-        
-    def get_model(self, model_id: str):
-        if model_id not in self.models:
-            raise KeyError(f"Model '{model_id}' not loaded.")
-        return self.models[model_id]
+load_models()
 
-# Global manager and cache
-model_manager = ModelManager()
-
-# Simple dict cache: key -> GenerateResponse
+# ---------------------------------------------------------------------------
+# Simple in-memory cache
+# ---------------------------------------------------------------------------
 image_cache = {}
 
-from huggingface_hub import hf_hub_download
+# ---------------------------------------------------------------------------
+# API functions — @spaces.GPU gives us a free GPU for each call
+# ---------------------------------------------------------------------------
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    hf_repo_id = os.environ.get("HF_REPO_ID", "shivrai01/mnist-ddpm-weight")
-    
-    # Startup: load the MNIST DDPM model
-    weights_path = os.path.join("weights", "ddpm_mnist_cond_best.weights.h5")
-    if not os.path.exists(weights_path):
-        logger.info(f"Local DDPM weights not found. Downloading from HF Hub ({hf_repo_id})...")
-        try:
-            # Note: hf_hub_download caches the file and returns the path to the cached file
-            weights_path = hf_hub_download(repo_id=hf_repo_id, filename="ddpm_mnist_cond_best.weights.h5")
-        except Exception as e:
-            logger.error(f"Failed to download DDPM weights from HF Hub: {e}")
+def api_health():
+    models = []
+    if unet_model is not None:
+        models.append("mnist-ddpm")
+    return json.dumps({"status": "ok", "loaded_models": models, "device": DEVICE.type})
 
+
+@spaces.GPU(duration=120)
+def api_generate(request_json: str):
     try:
-        model_manager.load_model("mnist-ddpm", weights_path)
-    except Exception as e:
-        logger.error(f"Failed to load model on startup: {e}")
+        req = json.loads(request_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON"})
 
-    # Load the sketch classifier
-    classifier_path = os.path.join("weights", "mnist_classifier.keras")
-    if not os.path.exists(classifier_path):
-        logger.info(f"Local Classifier weights not found. Downloading from HF Hub ({hf_repo_id})...")
-        try:
-            classifier_path = hf_hub_download(repo_id=hf_repo_id, filename="mnist_classifier.keras")
-        except Exception as e:
-            logger.error(f"Failed to download Classifier from HF Hub: {e}")
+    model_id = req.get("model_id", "mnist-ddpm")
+    digit = int(req.get("digit", 7))
+    guidance_scale = float(req.get("guidance_scale", 3.0))
+    seed = int(req.get("seed", 42))
 
-    try:
-        model_manager.load_classifier(classifier_path)
-    except Exception as e:
-        logger.error(f"Failed to load classifier on startup: {e}")
-
-    yield
-    # Shutdown
-    model_manager.models.clear()
-    model_manager.classifier = None
-
-app = FastAPI(title="Handwriting DDPM API", lifespan=lifespan)
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok", 
-        "loaded_models": list(model_manager.models.keys())
-    }
-
-# Run generation in a threadpool so it doesn't block the async event loop
-def do_generate(model_id: str, digit: int, guidance_scale: float, seed: int):
-    model = model_manager.get_model(model_id)
-    imgs = gen_samples(model, n_samples=1, conditioning=[digit], guidance_scale=guidance_scale, seed=seed)
-    return imgs[0].numpy()
-
-@app.post("/generate", response_model=GenerateResponse)
-async def generate(req: GenerateRequest):
-    # Check cache
-    cache_key = f"{req.model_id}_{req.digit}_{req.guidance_scale}_{req.seed}"
+    cache_key = f"{model_id}_{digit}_{guidance_scale}_{seed}"
     if cache_key in image_cache:
         logger.info(f"Cache hit for {cache_key}")
         return image_cache[cache_key]
 
-    logger.info(f"Generating digit {req.digit} with seed {req.seed} and GS {req.guidance_scale}...")
+    if unet_model is None:
+        return json.dumps({"error": "Model not loaded."})
+
+    logger.info(f"Generating digit {digit} with seed {seed} and GS {guidance_scale}...")
     start_time = time.time()
-    
-    try:
-        # Run synchronous generation in async executor
-        img_array = await asyncio.to_thread(
-            do_generate, 
-            req.model_id, 
-            req.digit, 
-            req.guidance_scale, 
-            req.seed
-        )
-    except KeyError:
-        raise HTTPException(status_code=400, detail=f"Model '{req.model_id}' is not available.")
-    except Exception as e:
-        logger.error(f"Generation failed: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error during generation.")
-        
+
+    # Generate — model is on GPU inside @spaces.GPU context
+    imgs = gen_samples(unet_model, n_samples=1, conditioning=[digit],
+                       guidance_scale=guidance_scale, seed=seed)
+    # imgs shape: (1, 1, 28, 28) on GPU, range [0, 1]
+    img_np = imgs[0].cpu().permute(1, 2, 0).numpy()   # -> (28, 28, 1)
     generation_time_ms = int((time.time() - start_time) * 1000)
-    
-    # Convert to base64
-    b64_image = array_to_base64_png(img_array)
-    
-    response = GenerateResponse(
-        image_b64=b64_image,
-        digit=req.digit,
-        guidance_scale=req.guidance_scale,
-        seed=req.seed,
-        generation_time_ms=generation_time_ms,
-        model_name=req.model_id
-    )
-    
-    # Save to cache
+
+    b64_image = array_to_base64_png(img_np)
+    response = json.dumps({
+        "image_b64": b64_image,
+        "digit": digit,
+        "guidance_scale": guidance_scale,
+        "seed": seed,
+        "generation_time_ms": generation_time_ms,
+        "model_name": model_id,
+    })
     image_cache[cache_key] = response
-    
     return response
 
-# Sketch-to-digit generation (Image-to-Image)
-def do_generate_from_sketch(model_id: str, sketch_b64: str, strength: float, digit: int, guidance_scale: float, seed: int):
-    model = model_manager.get_model(model_id)
-    x_start = base64_png_to_array(sketch_b64)
-    imgs = gen_samples_from_image(model, x_start, strength=strength, conditioning=[digit], guidance_scale=guidance_scale, seed=seed)
-    return imgs[0].numpy()
 
-@app.post("/classify-sketch", response_model=ClassifySketchResponse)
-async def classify_sketch(req: ClassifySketchRequest):
-    sketch_array = base64_png_to_array(req.sketch_b64)
-    predicted_digit, confidence = model_manager.classify(sketch_array)
-    return ClassifySketchResponse(
-        predicted_digit=predicted_digit,
-        confidence=round(confidence, 4) if confidence is not None else None
-    )
+@spaces.GPU(duration=30)
+def api_classify_sketch(request_json: str):
+    try:
+        req = json.loads(request_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON"})
 
-@app.post("/generate-from-sketch", response_model=GenerateResponse)
-async def generate_from_sketch(req: GenerateFromSketchRequest):
+    if classifier_model is None:
+        return json.dumps({"predicted_digit": None, "confidence": None})
+
+    sketch_b64 = req.get("sketch_b64", "")
+    sketch_np = base64_png_to_array(sketch_b64)            # (1, 28, 28, 1) range [-1, 1]
+    # Classifier expects [0, 1]
+    clf_input = (sketch_np + 1.0) / 2.0
+    # NHWC -> NCHW
+    clf_tensor = torch.from_numpy(clf_input).permute(0, 3, 1, 2).to(DEVICE)
+
+    with torch.no_grad():
+        preds = classifier_model(clf_tensor)    # (1, 10) softmax output
+    predicted_digit = int(preds[0].argmax().item())
+    confidence = float(preds[0].max().item())
+
+    return json.dumps({
+        "predicted_digit": predicted_digit,
+        "confidence": round(confidence, 4),
+    })
+
+
+@spaces.GPU(duration=120)
+def api_generate_from_sketch(request_json: str):
+    try:
+        req = json.loads(request_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON"})
+
+    if unet_model is None:
+        return json.dumps({"error": "Model not loaded."})
+
+    model_id = req.get("model_id", "mnist-ddpm")
+    sketch_b64 = req.get("sketch_b64", "")
+    digit = int(req.get("digit", 7))
+    strength = float(req.get("strength", 0.5))
+    guidance_scale = float(req.get("guidance_scale", 3.0))
+    seed = int(req.get("seed", 42))
+
+    logger.info(f"Sketch-to-digit: conditioning={digit}, strength={strength}, seed={seed}, GS={guidance_scale}")
     start_time = time.time()
 
-    logger.info(
-        f"Sketch-to-digit: conditioning={req.digit}, strength={req.strength}, "
-        f"seed={req.seed}, GS={req.guidance_scale}"
-    )
+    # Prepare sketch tensor: NHWC numpy -> NCHW torch
+    sketch_np = base64_png_to_array(sketch_b64)            # (1, 28, 28, 1) range [-1, 1]
+    x_start = torch.from_numpy(sketch_np).permute(0, 3, 1, 2).to(DEVICE)
 
-    try:
-        img_array = await asyncio.to_thread(
-            do_generate_from_sketch,
-            req.model_id,
-            req.sketch_b64,
-            req.strength,
-            req.digit,
-            req.guidance_scale,
-            req.seed
-        )
-    except KeyError:
-        raise HTTPException(status_code=400, detail=f"Model '{req.model_id}' is not available.")
-    except Exception as e:
-        logger.error(f"Sketch generation failed: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error during sketch generation.")
-
+    imgs = gen_samples_from_image(unet_model, x_start, strength=strength,
+                                  conditioning=[digit], guidance_scale=guidance_scale, seed=seed)
+    img_np = imgs[0].cpu().permute(1, 2, 0).numpy()
     generation_time_ms = int((time.time() - start_time) * 1000)
-    b64_image = array_to_base64_png(img_array)
 
-    return GenerateResponse(
-        image_b64=b64_image,
-        digit=req.digit,
-        guidance_scale=req.guidance_scale,
-        seed=req.seed,
-        generation_time_ms=generation_time_ms,
-        model_name=req.model_id,
-        predicted_digit=None,
-        confidence=None
-    )
+    b64_image = array_to_base64_png(img_np)
+    return json.dumps({
+        "image_b64": b64_image,
+        "digit": digit,
+        "guidance_scale": guidance_scale,
+        "seed": seed,
+        "generation_time_ms": generation_time_ms,
+        "model_name": model_id,
+        "predicted_digit": None,
+        "confidence": None,
+    })
+
+# ---------------------------------------------------------------------------
+# Gradio Blocks (API endpoints for the React frontend)
+# ---------------------------------------------------------------------------
+with gr.Blocks(title="MNIST Diffusion Backend") as demo:
+    gr.Markdown("## MNIST Handwriting Diffusion - Backend API\nThis space serves the backend API. The frontend is deployed on Vercel.")
+
+    with gr.Row(visible=False):
+        health_out = gr.Textbox()
+        gr.Button().click(fn=api_health, inputs=[], outputs=health_out, api_name="health")
+
+    with gr.Row(visible=False):
+        gen_in = gr.Textbox()
+        gen_out = gr.Textbox()
+        gr.Button().click(fn=api_generate, inputs=gen_in, outputs=gen_out, api_name="generate")
+
+    with gr.Row(visible=False):
+        cls_in = gr.Textbox()
+        cls_out = gr.Textbox()
+        gr.Button().click(fn=api_classify_sketch, inputs=cls_in, outputs=cls_out, api_name="classify-sketch")
+
+    with gr.Row(visible=False):
+        sketch_in = gr.Textbox()
+        sketch_out = gr.Textbox()
+        gr.Button().click(fn=api_generate_from_sketch, inputs=sketch_in, outputs=sketch_out, api_name="generate-from-sketch")
+
+# ---------------------------------------------------------------------------
+# FastAPI Wrapper (To support the legacy /api/ endpoints expected by frontend)
+# ---------------------------------------------------------------------------
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/api/health")
+async def health_endpoint():
+    # Return exactly the format App.jsx expects: { data: [ "{...}" ] }
+    return {"data": [api_health()]}
+
+@app.post("/api/generate")
+async def generate_endpoint(request: Request):
+    req_json = await request.json()
+    # The frontend sends: { data: [ "{\"digit\": 7, ...}" ] }
+    inner_json = req_json.get("data", ["{}"])[0]
+    return {"data": [api_generate(inner_json)]}
+
+@app.post("/api/classify-sketch")
+async def classify_sketch_endpoint(request: Request):
+    req_json = await request.json()
+    inner_json = req_json.get("data", ["{}"])[0]
+    return {"data": [api_classify_sketch(inner_json)]}
+
+@app.post("/api/generate-from-sketch")
+async def generate_from_sketch_endpoint(request: Request):
+    req_json = await request.json()
+    inner_json = req_json.get("data", ["{}"])[0]
+    return {"data": [api_generate_from_sketch(inner_json)]}
+
+# Mount Gradio app at root
+app = gr.mount_gradio_app(app, demo, path="/")
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=5000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=7860)

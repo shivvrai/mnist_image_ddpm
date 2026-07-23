@@ -1,7 +1,6 @@
-fastapi
-uvicorn
-pydantic
-tensorflow==2.21.0
+torch
+gradio
+spaces
 numpy
 pillow
 huggingface-hub
