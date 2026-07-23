@@ -24,38 +24,52 @@ import gradio as gr
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+from huggingface_hub import hf_hub_download
+
 from utils import logger, array_to_base64_png, base64_png_to_array
 from ddpm import UNet, gen_samples, gen_samples_from_image
 from classifier import MNISTClassifier
 
 # ---------------------------------------------------------------------------
-# Model loading
+# Model loading — uses hf_hub_download to properly resolve LFS pointers
 # ---------------------------------------------------------------------------
+REPO_ID = "shivv01/mnist-backend"
+
 unet_model = None
 classifier_model = None
+
+def _download_weight(filename):
+    """Download a weight file from the HF Space repo, resolving LFS pointers."""
+    try:
+        path = hf_hub_download(repo_id=REPO_ID, filename=f"weights/{filename}", repo_type="space")
+        logger.info(f"Downloaded {filename} to {path}")
+        return path
+    except Exception as e:
+        logger.error(f"Failed to download {filename}: {e}")
+        return None
 
 def load_models():
     global unet_model, classifier_model
     
     logger.info(f"Using device: {DEVICE}")
 
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    unet_path = os.path.join(base_dir, "weights", "ddpm_unet.pt")
-    clf_path = os.path.join(base_dir, "weights", "mnist_classifier.pt")
+    # Download weights via HF Hub API (resolves LFS pointers correctly)
+    unet_path = _download_weight("ddpm_unet.pt")
+    clf_path = _download_weight("mnist_classifier.pt")
 
     # Load UNet
-    if os.path.exists(unet_path):
+    if unet_path:
         logger.info(f"Loading UNet from {unet_path}...")
         unet_model = UNet()
         unet_model.load_state_dict(torch.load(unet_path, map_location="cpu", weights_only=False))
         unet_model.eval()
-        unet_model.to(DEVICE)      # ZeroGPU: stays on CPU until @spaces.GPU runs
+        unet_model.to(DEVICE)
         logger.info("UNet loaded successfully.")
     else:
-        logger.error(f"UNet weights not found at {unet_path}")
+        logger.error("UNet weights could not be downloaded.")
 
     # Load Classifier
-    if os.path.exists(clf_path):
+    if clf_path:
         logger.info(f"Loading Classifier from {clf_path}...")
         classifier_model = MNISTClassifier()
         classifier_model.load_state_dict(torch.load(clf_path, map_location="cpu", weights_only=False))
@@ -63,7 +77,7 @@ def load_models():
         classifier_model.to(DEVICE)
         logger.info("Classifier loaded successfully.")
     else:
-        logger.warning(f"Classifier weights not found at {clf_path}. Sketch prediction disabled.")
+        logger.warning("Classifier weights could not be downloaded. Sketch prediction disabled.")
 
 load_models()
 
