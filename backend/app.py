@@ -265,4 +265,5 @@ async def generate_from_sketch_endpoint(request: Request):
 app = gr.mount_gradio_app(app, demo, path="/")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    port = int(os.environ.get("GRADIO_SERVER_PORT", os.environ.get("PORT", 7860)))
+    uvicorn.run(app, host="0.0.0.0", port=port)
