@@ -2,17 +2,17 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Database, RefreshCw, LayoutGrid, Play, Zap, PenTool, Trash2, Eye } from 'lucide-react';
 import './index.css';
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:7860";
+const API_URL = import.meta.env.VITE_API_URL || "https://shivv01-mnist-backend.hf.space";
 const CANVAS_SIZE = 280; // 10x MNIST resolution for comfortable drawing
 
 // ---------------------------------------------------------------------------
 // Gradio API helper — uses the two-step SSE protocol required by HF Spaces
-// Step 1: POST /gradio_api/call/<api_name> with { data: [...] } → { event_id }
-// Step 2: GET  /gradio_api/call/<api_name>/<event_id> → SSE stream → "complete" event has the result
+// Step 1: POST /call/<api_name> with { data: [...] } → { event_id }
+// Step 2: GET  /call/<api_name>/<event_id> → SSE stream → "complete" event has the result
 // ---------------------------------------------------------------------------
 async function gradioCall(apiName, ...args) {
   // Step 1: Submit the call
-  const submitRes = await fetch(`${API_URL}/gradio_api/call/${apiName}`, {
+  const submitRes = await fetch(`${API_URL}/call/${apiName}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ data: args }),
@@ -27,7 +27,7 @@ async function gradioCall(apiName, ...args) {
 
   // Step 2: Read the SSE stream for the result
   const streamRes = await fetch(
-    `${API_URL}/gradio_api/call/${apiName}/${event_id}`
+    `${API_URL}/call/${apiName}/${event_id}`
   );
 
   if (!streamRes.ok) {
