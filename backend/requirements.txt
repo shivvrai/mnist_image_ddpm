@@ -4,3 +4,4 @@ spaces
 numpy
 pillow
 huggingface-hub<0.27.0
+jinja2<3.1.5
