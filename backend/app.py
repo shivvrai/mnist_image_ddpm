@@ -47,7 +47,7 @@ def load_models():
     if os.path.exists(unet_path):
         logger.info(f"Loading UNet from {unet_path}...")
         unet_model = UNet()
-        unet_model.load_state_dict(torch.load(unet_path, map_location="cpu", weights_only=True))
+        unet_model.load_state_dict(torch.load(unet_path, map_location="cpu", weights_only=False))
         unet_model.eval()
         unet_model.to(DEVICE)      # ZeroGPU: stays on CPU until @spaces.GPU runs
         logger.info("UNet loaded successfully.")
@@ -58,7 +58,7 @@ def load_models():
     if os.path.exists(clf_path):
         logger.info(f"Loading Classifier from {clf_path}...")
         classifier_model = MNISTClassifier()
-        classifier_model.load_state_dict(torch.load(clf_path, map_location="cpu", weights_only=True))
+        classifier_model.load_state_dict(torch.load(clf_path, map_location="cpu", weights_only=False))
         classifier_model.eval()
         classifier_model.to(DEVICE)
         logger.info("Classifier loaded successfully.")
