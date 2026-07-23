@@ -2,12 +2,9 @@ import time
 import os
 import json
 import numpy as np
-import torch
-import gradio as gr
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ZeroGPU support — graceful fallback for local development
+# IMPORTANT: import spaces MUST happen before import torch!
 try:
     import spaces
 except ImportError:
@@ -21,6 +18,11 @@ except ImportError:
                 return f
             return decorator
     spaces = _FakeSpaces()
+
+import torch
+import gradio as gr
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 from utils import logger, array_to_base64_png, base64_png_to_array
 from ddpm import UNet, gen_samples, gen_samples_from_image
